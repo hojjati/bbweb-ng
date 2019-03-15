@@ -1,5 +1,5 @@
 import { Component, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, NavigationEnd } from '@angular/router';
 import { AnnotationType } from '@app/domain/annotations';
 import { CollectionEventType, Study } from '@app/domain/studies';
 import { CollectedSpecimenDefinition } from '@app/domain/studies/collected-specimen-definition.model';
@@ -10,11 +10,18 @@ import { AnnotationTypeViewComponent } from '@app/shared/components/annotation-t
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap';
 import { createSelector, select, Store } from '@ngrx/store';
 import { ToastrService } from 'ngx-toastr';
-import { Subject } from 'rxjs';
-import { takeUntil } from 'rxjs/operators';
+import { Subject, Observable } from 'rxjs';
+import { takeUntil, map, withLatestFrom, tap, share, filter } from 'rxjs/operators';
 import { EventTypeRemoveComponent } from '../event-type-remove/event-type-remove.component';
 import { SpecimenDefinitionRemoveComponent } from '../specimen-definition-remove/specimen-definition-remove.component';
 import { SpecimenDefinitionViewComponent } from '../specimen-definition-view/specimen-definition-view.component';
+import { SpinnerStoreSelectors } from '@app/root-store/spinner';
+
+interface StoreData {
+  study: Study;
+  eventType: CollectionEventType;
+  allowChanges: boolean;
+}
 
 @Component({
   selector: 'app-event-type-view',
@@ -26,14 +33,20 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
   @ViewChild('updateDescriptionModal') updateDescriptionModal: TemplateRef<any>;
   @ViewChild('updateRecurringModal') updateRecurringModal: TemplateRef<any>;
 
-  eventType: CollectionEventType;
-  study: Study;
-  allowChanges: boolean;
-  isAddingAnnotation = false;
+  isLoading$: Observable<boolean>;
+  study$: Observable<Study>;
+  eventType$: Observable<CollectionEventType>;
+  allowChanges$: Observable<boolean>;
+
   updateNameModalOptions: ModalInputTextOptions;
   updateDescriptionModalOptions: ModalInputTextareaOptions;
 
-  private updatedMessage: string;
+  private data$: Observable<StoreData>;
+  private eventType: CollectionEventType;
+  private study: Study;
+  private allowChanges: boolean;
+  private eventTypeId: string;
+  private updatedMessage$ = new Subject<string>();
   private unsubscribe$: Subject<void> = new Subject<void>();
 
   constructor(private store$: Store<RootStoreState.State>,
@@ -43,63 +56,98 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
               private toastr: ToastrService) {}
 
   ngOnInit() {
+    this.isLoading$ = this.store$.pipe(select(SpinnerStoreSelectors.selectSpinnerIsActive));
+
     const entitiesSelector = createSelector(
       StudyStoreSelectors.selectAllStudies,
       EventTypeStoreSelectors.selectAllEventTypes,
+
       (studies: Study[], eventTypes: CollectionEventType[]) => {
         return { studies, eventTypes };
       });
 
-    this.store$.pipe(
+    this.router.events.pipe(
+      filter(x => x instanceof NavigationEnd),
+      takeUntil(this.unsubscribe$)
+    ).subscribe((event: NavigationEnd) => {
+      console.log(event, this.route.snapshot.params.eventTypeSlug);
+
+      this.store$.dispatch(new EventTypeStoreActions.GetEventTypeRequest({
+        studySlug: this.route.parent.parent.parent.parent.snapshot.params.slug,
+        eventTypeSlug: this.route.snapshot.params.eventTypeSlug
+      }));
+    });
+
+    this.data$ = this.store$.pipe(
       select(entitiesSelector),
-      takeUntil(this.unsubscribe$))
-      .subscribe((entities: any) => {
+      takeUntil(this.unsubscribe$),
+      map((entities: any) => {
+        let study: Study;
+        let eventType: CollectionEventType;
+
         const studyEntity = entities.studies
           .find((s: Study) => s.slug === this.route.parent.parent.parent.parent.snapshot.params.slug);
         if (studyEntity) {
-          this.study = (studyEntity instanceof Study)
-            ? studyEntity :  new Study().deserialize(studyEntity);
-          this.allowChanges = this.study.isDisabled();
+          study = (studyEntity instanceof Study) ? studyEntity :  new Study().deserialize(studyEntity);
         }
 
         const eventTypeEntity = entities.eventTypes
           .find((et: CollectionEventType) => et.slug === this.route.snapshot.params.eventTypeSlug);
 
         if (eventTypeEntity) {
-          this.eventType = (eventTypeEntity instanceof CollectionEventType)
+          eventType = (eventTypeEntity instanceof CollectionEventType)
             ? eventTypeEntity : new CollectionEventType().deserialize(eventTypeEntity);
-          if (this.updatedMessage) {
-            this.toastr.success(this.updatedMessage, 'Update Successfull');
+          this.eventTypeId = eventType.id;
+        } else if (this.eventTypeId) {
+          // this only runs if the slug was changed or the was deleted
+          const eventTypeEntityById = entities.eventTypes
+            .find((et: CollectionEventType) => et.id === this.eventType.id);
+
+          if (eventTypeEntityById) {
+            eventType = (eventTypeEntityById instanceof CollectionEventType)
+              ? eventTypeEntityById : new CollectionEventType().deserialize(eventTypeEntityById);
           }
-          return;
         }
 
-        if (!this.eventType) { return; }
+        return {
+          study,
+          eventType,
+          allowChanges: study ? study.isDisabled() : undefined
+        };
+      }),
+      tap(data => {
+        console.log(data);
+        this.study = data.study;
+        this.eventType = data.eventType;
+        this.allowChanges = data.allowChanges;
+      }),
+      share());
 
-        // this only runs if the slug was changed or the was deleted
-        const eventTypeEntityById = entities.eventTypes
-          .find((et: CollectionEventType) => et.id === this.eventType.id);
+    this.study$ = this.data$.pipe(map(data => data.study));
+    this.eventType$ = this.data$.pipe(map(data => data.eventType));
+    this.allowChanges$ = this.data$.pipe(map(data => data.allowChanges));
 
-        if (eventTypeEntityById) {
-          this.eventType = (eventTypeEntityById instanceof CollectionEventType)
-            ? eventTypeEntityById : new CollectionEventType().deserialize(eventTypeEntityById);
-          console.log(this.study.slug, eventTypeEntityById.slug);
-          this.eventType = eventTypeEntityById;
+    this.data$.pipe(
+      withLatestFrom(this.updatedMessage$),
+      takeUntil(this.unsubscribe$)
+    ).subscribe(([ data, msg ]) => {
+      this.toastr.success(msg, 'Update Successfull');
 
+      if (data.eventType !== undefined) {
+        if (data.eventType.slug !== this.route.snapshot.params.eventTypeSlug) {
+          // name was changed and new slug was assigned
+          //
+          // need to change state since slug is used in URL and by breadcrumbs
           this.router.navigate([
-            `/admin/studies/${this.study.slug}/collection/view/${eventTypeEntityById.slug}`
+            `/admin/studies/${data.study.slug}/collection/view/${data.eventType.slug}`
           ]);
-
-          if (this.updatedMessage) {
-            this.toastr.success(this.updatedMessage, 'Update Successfull');
-          }
-          return;
         }
-
+      } else {
+        this.router.navigate([ `/admin/studies/${data.study.slug}/collection/view` ]);
         this.eventType = undefined;
-        this.router.navigate([ '/admin/studies/', this.study.slug, 'collection/view' ]);
-        this.toastr.success('Event removed');
-      });
+        this.eventTypeId = undefined;
+      }
+    });
   }
 
   ngOnDestroy() {
@@ -123,7 +171,7 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
           attributeName: 'name',
           value
         }));
-        this.updatedMessage = 'Event name was updated';
+        this.updatedMessage$.next('Event name was updated');
       })
       .catch(() => undefined);
   }
@@ -144,7 +192,7 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
           attributeName: 'description',
           value
         }));
-        this.updatedMessage = 'Event description was updated';
+        this.updatedMessage$.next('Event description was updated');
       })
       .catch(() => undefined);
   }
@@ -161,7 +209,7 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
           attributeName: 'recurring',
           value
         }));
-        this.updatedMessage = 'Recurring was updated';
+        this.updatedMessage$.next('Recurring was updated');
       })
       .catch(() => undefined);
   }
@@ -204,7 +252,7 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
           annotationTypeId: annotationType.id
         }));
 
-        this.updatedMessage = 'Annotation removed';
+        this.updatedMessage$.next('Annotation removed');
       })
       .catch(() => undefined);
   }
@@ -247,7 +295,7 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
           specimenDefinitionId: specimenDefinition.id
         }));
 
-        this.updatedMessage = 'Specimen removed';
+        this.updatedMessage$.next('Specimen removed');
       })
       .catch(() => undefined);
   }
@@ -265,13 +313,13 @@ export class EventTypeViewContainerComponent implements OnInit, OnDestroy {
           eventType: this.eventType
         }));
 
-        this.updatedMessage = 'Event removed';
+        this.updatedMessage$.next('Event removed');
       })
       .catch(() => undefined);
   }
 
   addEventTypeSelected() {
-    if (!this.study.isDisabled()) {
+    if (!this.allowChanges) {
       throw new Error('modifications not allowed');
     }
 

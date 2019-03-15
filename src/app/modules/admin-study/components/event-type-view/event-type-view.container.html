@@ -1,6 +1,6 @@
 <app-event-type-view-ui *ngIf="!(isLoading$ | async); else showLoading"
-                        [eventType]="eventType"
-                        [allowChanges]="allowChanges"
+                        [eventType]="eventType$ | async"
+                        [allowChanges]="allowChanges$ | async"
                         (updateNameSelected)="updateName($event)"
                         (updateDescriptionSelected)="updateDescription($event)"
                         (updateRecurringSelected)="updateRecurring($event)"

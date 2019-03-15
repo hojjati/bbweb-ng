@@ -81,6 +81,38 @@ describe('ProcessingTypeViewContainerComponent', () => {
     expect(component.processingType).toBe(processingType);
   });
 
+  it('navigates to new path when name is changed', fakeAsync(() => {
+    const modalService = TestBed.get(NgbModal);
+    const { study, processingType } = entityFixture.createEntities();
+    createMockActivatedRouteSpies(study, processingType);
+    store.dispatch(new StudyStoreActions.GetStudySuccess({ study }));
+    store.dispatch(new ProcessingTypeStoreActions.GetProcessingTypeSuccess({ processingType }));
+    flush();
+    fixture.detectChanges();
+
+    const newName = factory.stringNext();
+    const ptWithNewName = new ProcessingType().deserialize({
+      ...processingType as any,
+      ...factory.nameAndSlug()
+    });
+
+    const routerListener = jest.spyOn(router, 'navigate').mockReturnValue(true);
+    jest.spyOn(modalService, 'open').mockReturnValue({ result: Promise.resolve(newName) });
+    component.updateName();
+    flush();
+    fixture.detectChanges();
+
+    store.dispatch(new ProcessingTypeStoreActions.UpdateProcessingTypeSuccess({
+      processingType: ptWithNewName
+    }));
+    flush();
+    fixture.detectChanges();
+
+    expect(routerListener.mock.calls.length).toBe(1);
+    expect(routerListener.mock.calls[0][0]).toEqual([
+      `/admin/studies/${study.slug}/processing/view/${ptWithNewName.slug}`]);
+  }));
+
   describe('for input entity', () => {
 
     describe('when already in the store', () => {
@@ -410,21 +442,33 @@ describe('ProcessingTypeViewContainerComponent', () => {
       });
     }));
 
-    it('event type becomes undefined when removed', () => {
+    it('event type becomes undefined when removed', fakeAsync(() => {
       const entities = createEntities();
-      const spy = jest.spyOn(router, 'navigate').mockReturnValue(true);
+      fixture.detectChanges();
+
+      const routerListener = jest.spyOn(router, 'navigate').mockReturnValue(true);
+      const modalService = TestBed.get(NgbModal);
+      jest.spyOn(modalService, 'open').mockReturnValue({
+        componentInstance: {},
+        result: Promise.resolve('OK')
+      });
+
+      debugger;
+      component.removeProcessingType()
+      flush();
       fixture.detectChanges();
 
       const action = new ProcessingTypeStoreActions.RemoveProcessingTypeSuccess({
         processingTypeId: entities.processingType.id
       });
       store.dispatch(action);
+      flush();
       fixture.detectChanges();
 
       expect(component.processingType).toBeUndefined();
-      expect(spy).toHaveBeenCalled();
-      expect(spy.mock.calls[0][0]).toEqual([ `/admin/studies/${entities.study.slug}/processing` ]);
-    });
+      expect(routerListener).toHaveBeenCalled();
+      expect(routerListener.mock.calls[0][0]).toEqual([ `/admin/studies/${entities.study.slug}/processing` ]);
+    }));
 
     it('opens a modal if the processing type is in use', () => {
       const entities = createEntities();
@@ -432,6 +476,7 @@ describe('ProcessingTypeViewContainerComponent', () => {
         ...entities.processingType,
         inUse: true
       });
+
       store.dispatch(new ProcessingTypeStoreActions.UpdateProcessingTypeSuccess({
         processingType: inUseProcessingType
       }));

@@ -10,11 +10,17 @@ import { NgbModal } from '@ng-bootstrap/ng-bootstrap';
 import { Dictionary } from '@ngrx/entity';
 import { Action, createSelector, select, Store } from '@ngrx/store';
 import { ToastrService } from 'ngx-toastr';
-import { Subject } from 'rxjs';
-import { takeUntil } from 'rxjs/operators';
+import { Subject, Observable } from 'rxjs';
+import { takeUntil, tap, map, withLatestFrom } from 'rxjs/operators';
 import { ProcessingInputSpecimenModalComponent } from '../processing-input-specimen-modal/processing-input-specimen-modal.component';
 import { ProcessingOutputSpecimenModalComponent } from '../processing-output-specimen-modal/processing-output-specimen-modal.component';
 import { ProcessingTypeRemoveComponent } from '../processing-type-remove/processing-type-remove.component';
+
+interface StoreData {
+  study: Study;
+  processingType: ProcessingType;
+  allowChanges: boolean;
+}
 
 interface Entities {
   studies: Study[];
@@ -33,9 +39,14 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
   @ViewChild('updateEnabledModal') updateEnabledModal: TemplateRef<any>;
   @ViewChild('processingTypeInUseModal') processingTypeInUseModal: TemplateRef<any>;
 
+  study$: Observable<Study>;
+  processingType$: Observable<ProcessingType>;
+  allowChanges$: Observable<boolean>;
+
   processingType: ProcessingType;
   eventTypes: CollectionEventType[];
   processingTypes: ProcessingType[];
+  processingTypeId: string;
   study: Study;
   allowChanges: boolean;
   isAddingAnnotation = false;
@@ -43,7 +54,8 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
   updateDescriptionModalOptions: ModalInputTextareaOptions;
   inputEntity: ProcessingTypeInputEntity;
 
-  private updatedMessage: string;
+  private data$: Observable<StoreData>;
+  private updatedMessage$ = new Subject<string>();
   private unsubscribe$: Subject<void> = new Subject<void>();
 
   constructor(private store$: Store<RootStoreState.State>,
@@ -67,53 +79,76 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
          };
        });
 
-    this.store$.pipe(
+    this.data$ = this.store$.pipe(
       select(entitiesSelector),
-      takeUntil(this.unsubscribe$))
-      .subscribe((entities) => {
+      map((entities) => {
+        let study: Study;
+        let processingType: ProcessingType;
+
         const studyEntity = entities.studies
           .find(s => s.slug === this.route.parent.parent.parent.parent.snapshot.params.slug);
         if (studyEntity) {
-          const study = (studyEntity instanceof Study)
-            ? studyEntity :  new Study().deserialize(studyEntity);
-          this.allowChanges = study.isDisabled();
-          this.study = study;
+          study = (studyEntity instanceof Study) ? studyEntity :  new Study().deserialize(studyEntity);
         }
 
-        const ptEntity = entities.processingTypes.find(
-          pt => pt.slug === this.route.parent.snapshot.params.processingTypeSlug);
+        const ptEntity = entities.processingTypes
+          .find(pt => pt.slug === this.route.parent.snapshot.params.processingTypeSlug);
 
         if (ptEntity) {
-          this.processingType = (ptEntity instanceof ProcessingType)
+          processingType = (ptEntity instanceof ProcessingType)
             ? ptEntity : new ProcessingType().deserialize(ptEntity);
 
-          if (this.updatedMessage) {
-            this.toastr.success(this.updatedMessage, 'Update Successfull');
+          if (this.processingTypeId === undefined) {
+            this.processingTypeId = processingType.id;
+            this.inputEntity = this.queryForInputEntity(processingType, entities);
           }
+        } else if (this.processingTypeId) {
+          const ptEntityById = entities.processingTypes.find(pt => pt.id === this.processingType.id);
 
-          this.queryForInputEntity(entities);
-          return;
+          if (ptEntityById) {
+            processingType = (ptEntityById instanceof ProcessingType)
+              ? ptEntityById : new ProcessingType().deserialize(ptEntityById);
+          }
         }
 
-        if (!this.processingType) { return; }
-
-        const ptEntityById = entities.processingTypes.find(pt => pt.id === this.processingType.id);
-
-        if (ptEntityById) {
-          this.processingType = (ptEntityById instanceof ProcessingType)
-            ? ptEntityById : new ProcessingType().deserialize(ptEntityById);
-          this.router.navigate(
-            [ `/admin/studies/${this.study.slug}/processing/view/${this.processingType.slug}` ]);
-          if (this.updatedMessage) {
-            this.toastr.success(this.updatedMessage, 'Update Successfull');
-          }
-          return;
+        return {
+          study,
+          processingType,
+          allowChanges: study ? study.isDisabled() : undefined
         }
+      }),
+      tap(data => {
+        this.study = data.study;
+        this.processingType = data.processingType;
+        this.allowChanges = data.allowChanges;
+      }));
 
+    this.study$ = this.data$.pipe(map(data => data.study));
+    this.processingType$ = this.data$.pipe(map(data => data.processingType));
+    this.allowChanges$ = this.data$.pipe(map(data => data.allowChanges));
+
+    this.data$.pipe(
+      withLatestFrom(this.updatedMessage$),
+      takeUntil(this.unsubscribe$)
+    ).subscribe(([ data, msg ]) => {
+      this.toastr.success(msg, 'Update Successfull');
+
+      if (data.processingType !== undefined) {
+        debugger;
+        if (data.processingType.slug !== this.route.parent.snapshot.params.processingTypeSlug) {
+          // name was changed and new slug was assigned
+          //
+          // need to change state since slug is used in URL and by breadcrumbs
+          this.router.navigate([
+            `/admin/studies/${data.study.slug}/processing/view/${data.processingType.slug}`
+          ]);
+        }
+      } else {
+        this.router.navigate([ `/admin/studies/${data.study.slug}/processing` ]);
         this.processingType = undefined;
-        this.router.navigate([ `/admin/studies/${this.study.slug}/processing` ]);
-        this.toastr.success('Processing step removed', 'Removed');
-      });
+        this.processingTypeId = undefined;
+      }
+    });
   }
 
   ngOnDestroy() {
@@ -122,6 +157,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
   }
 
   updateName() {
+    debugger;
     if (!this.allowChanges) {
       throw new Error('modifications not allowed');
     }
@@ -137,7 +173,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
           attributeName: 'name',
           value
         }));
-        this.updatedMessage = 'Event name was updated';
+        this.updatedMessage$.next('Event name was updated');
       })
       .catch(err => console.log('err', err));
   }
@@ -158,7 +194,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
           attributeName: 'description',
           value: value ? value : undefined
         }));
-        this.updatedMessage = 'Event description was updated';
+        this.updatedMessage$.next('Event description was updated');
       })
       .catch(err => console.log('err', err));
   }
@@ -175,7 +211,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
           attributeName: 'enabled',
           value
         }));
-        this.updatedMessage = 'Enabled was updated';
+        this.updatedMessage$.next('Enabled was updated');
       })
       .catch(err => console.log('err', err));
   }
@@ -219,7 +255,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
             annotationTypeId: annotationType.id
           }));
 
-        this.updatedMessage = 'Annotation removed';
+        this.updatedMessage$.next('Annotation removed');
       })
       .catch(() => undefined);
   }
@@ -242,7 +278,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
           value: input
         }));
 
-        this.updatedMessage = 'Input specimen updated';
+        this.updatedMessage$.next('Input specimen updated');
       })
       .catch(() => undefined);
   }
@@ -268,7 +304,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
           value: output
         }));
 
-        this.updatedMessage = 'Output specimen updated';
+        this.updatedMessage$.next('Output specimen updated');
       })
       .catch(() => undefined);
   }
@@ -290,6 +326,7 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
         this.store$.dispatch(new ProcessingTypeStoreActions.RemoveProcessingTypeRequest({
           processingType: this.processingType
         }));
+        this.updatedMessage$.next('Processing step removed');
       })
       .catch(() => undefined);
   }
@@ -309,28 +346,32 @@ export class ProcessingTypeViewContainerComponent implements OnInit, OnDestroy {
     this.router.navigate([ `/admin/studies/${this.study.slug}/processing/${processingType.slug}` ]);
   }
 
-  private queryForInputEntity(entities: Entities) {
-    this.inputEntity =
-      (this.processingType.input.definitionType === 'collected')
-      ? entities.eventTypeEntities[this.processingType.input.entityId]
-      : entities.processingTypes.find(pt => pt.id === this.processingType.input.entityId);
+  private queryForInputEntity(
+    processingType: ProcessingType,
+    entities: Entities
+  ): ProcessingTypeInputEntity {
+    const inputEntity =
+      (processingType.input.definitionType === 'collected')
+      ? entities.eventTypeEntities[processingType.input.entityId]
+      : entities.processingTypes.find(pt => pt.id === processingType.input.entityId);
 
-    if (!this.inputEntity) {
-      let action: Action;
-      // then entity has not been retrieved from the server yet
-      if (this.processingType.input.definitionType === 'collected') {
-        action = new EventTypeStoreActions.GetEventTypeByIdRequest({
-          studyId: this.processingType.studyId,
-          eventTypeId: this.processingType.input.entityId
-        });
-      } else {
-        action = new ProcessingTypeStoreActions.GetProcessingTypeByIdRequest({
-          studyId: this.processingType.studyId,
-          processingTypeId: this.processingType.input.entityId
-        });
-      }
-      this.store$.dispatch(action);
+    if (inputEntity) { return inputEntity; }
+
+    let action: Action;
+    // then entity has not been retrieved from the server yet
+    if (processingType.input.definitionType === 'collected') {
+      action = new EventTypeStoreActions.GetEventTypeByIdRequest({
+        studyId: processingType.studyId,
+        eventTypeId: processingType.input.entityId
+      });
+    } else {
+      action = new ProcessingTypeStoreActions.GetProcessingTypeByIdRequest({
+        studyId: processingType.studyId,
+        processingTypeId: processingType.input.entityId
+      });
     }
+    this.store$.dispatch(action);
+    return undefined;
   }
 
 }
