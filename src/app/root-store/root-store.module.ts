@@ -22,11 +22,12 @@ import { RoleStoreReducer } from './role';
 import { RoleStoreEffects } from './role/role.effects';
 import { MembershipStoreEffects } from './membership/membership.effects';
 import { MembershipStoreReducer } from './membership';
+import { StoreRouterConnectingModule, routerReducer } from '@ngrx/router-store';
 
 @NgModule({
   imports: [
     CommonModule,
-    StoreModule.forRoot({}),
+    StoreModule.forRoot({ router: routerReducer }),
     StoreModule.forFeature('auth', AuthStoreReducer.reducer),
     StoreModule.forFeature('centre', CentreStoreReducer.reducer),
     StoreModule.forFeature('event-type', EventTypeStoreReducer.reducer),
